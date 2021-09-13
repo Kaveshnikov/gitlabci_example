@@ -1,0 +1,119 @@
+# This is a place for different jobs templates.
+
+.test-branch-template:
+  tags:
+    - shell
+    - stage
+  variables:
+    TEST_ENV: "true"
+  artifacts:
+    expose_as: "Test results"
+    paths:
+      - reports/htmlcov
+      - reports/.junit.xml
+      - reports/coverage.xml
+    reports:
+      cobertura: reports/coverage.xml
+  before_script:
+    - $CLEANUP_SCRIPT
+    - >
+      if [ $(docker ps -q | wc -l | xargs) != "0" ];
+      then docker kill $(docker ps -q);
+      fi;
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  after_script:
+    - docker-compose -p $PROJECT_NAME down --rmi all --remove-orphans
+    - docker logout $CI_REGISTRY
+    - $CLEANUP_SCRIPT
+  script:
+    - set -e
+    - docker-compose build --force-rm --pull $PROJECT_NAME
+    - >
+      docker-compose -p $PROJECT_NAME run $PROJECT_NAME bash -c "
+      set -e;
+      pytest -vvv --junitxml=.junit.xml --cov=. --cov-report=term-missing --no-cov-on-fail tests;
+      coverage html;
+      coverage xml -i;
+      ls -la;
+      ls -la /reports;
+      mv htmlcov /reports/htmlcov;
+      mv .junit.xml /reports/.junit.xml;
+      mv coverage.xml /reports/coverage.xml;
+      chmod 777 -R /reports;"
+
+
+.sonar-scanner-template:
+  image:
+    name: $SONAR_SCAN_IMAGE
+  variables:
+    GIT_DEPTH: 0
+  tags:
+    - docker
+    - stage
+  script:
+    - sed -i "s,<source>.*</source>$,<source>$CI_PROJECT_DIR</source>,g" reports/coverage.xml
+    - >
+      sonar-scanner -X
+      -Dsonar.host.url=${SONAR_HOST}
+      -Dproject.settings=${SONAR_SETTINGS}
+      -Dsonar.qualitygate.wait=true
+
+
+.create-badge-template:
+  image: $CREATE_BADGE_IMAGE
+  tags:
+    - docker
+  before_script:
+    - echo "Python other dependencies installation"
+    - pip3 install anybadge --index-url $PYTHON_REPO_INDEX_URL
+  artifacts:
+    paths:
+      - $BADGE_FILE
+    when: always
+    expire_in: 4 weeks
+
+
+.base-deploy-template:
+  image: $DEPLOY_IMAGE
+  script:
+    - set -e
+    - IMAGE_TAG="v$(< .version)"
+    - echo "image $IMAGE_NAME:$IMAGE_TAG"
+    - echo "namespace $NAMESPACE"
+    - echo "layer $LAYER"
+    - echo "values $HELM_VALUES"
+    - echo "app_group $HELM_APP_GROUP_NAME"
+    - kubectl config set-credentials $KUBE_USER --token=$(echo $KUBE_TOKEN | base64 --decode -)
+    - kubectl config set-context deploy --cluster=${LAYER} --user=$KUBE_USER --namespace=${NAMESPACE}
+    - kubectl config use-context deploy
+    - helm repo update
+    - >
+      helm -n ${NAMESPACE} upgrade
+      -i --atomic --debug
+      --set applications.ml.containers.app.imageTag=$IMAGE_TAG
+      --set applications.ml.containers.app.image=$IMAGE_NAME
+      --timeout $DEPLOY_TIMEOUT
+      -f ${HELM_VALUES}
+      --version ${HELM_VERSION}
+      --history-max 5
+      ${HELM_APP_GROUP_NAME} $HELM_CHART
+
+
+.login-logout-registry-template:
+  before_script:
+    - $CLEANUP_SCRIPT
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  after_script:
+    - docker logout $CI_REGISTRY
+    - $CLEANUP_SCRIPT
+
+
+.base-notify-template:
+  allow_failure: false
+  image: $NOTIFY_IMAGE
+  tags:
+    - docker
+    - internet
+  script:
+    - version=$(<.version)
+    - NEEDLE_TAG=v"$version" send-to-slack

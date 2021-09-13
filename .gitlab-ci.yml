@@ -1,0 +1,45 @@
+stages:
+  - Calc Version
+  - Build And Test
+  - Deploy Stage
+  - Notify Stage
+  - Deploy Pre
+  - Notify Pre
+  - Get Version
+  - Deploy Prod
+  - Notify Prod
+
+
+variables:
+# k8s namespace
+  NAMESPACE:
+  CI_REGISTRY: $REGISTRY
+  CI_REGISTRY_USER: $REGISTRY_USER
+  CI_REGISTRY_PASSWORD: $REGISTRY_PASSWORD
+  IMAGE_NAME: ${REGISTRY}/${REGISTRY_NS}/${SERVICE_NAME}
+  HELM_VERSION:
+  HELM_APP_GROUP_NAME: $SERVICE_NAME
+  CLEANUP_SCRIPT: workspace-cleanup
+  PROJECT_NAME: $SERVICE_NAME
+# Docker image in which an app will be built and tested
+  BUILD_AND_TEST_IMAGE:
+# Docker image for new version calculation
+  CALC_VERSION_IMAGE:
+# Docker image for Sonar scanning
+  SONAR_SCAN_IMAGE:
+#  Url for Python repository index (parameter for pip install --index-url)
+  PYTHON_REPO_INDEX_URL:
+# Docker image with deploy utilities (helm)
+  DEPLOY_IMAGE:
+  KUBE_USER:
+  HELM_CHART:
+
+# CI / CD
+# It is separated into 2 pipelines
+# - merge request (.gitlab-ci-merge-request.yml) - pipeline is triggered on merge request events
+# - master (.gitlab-ci-master-deploy-test.yml) - pipeline is triggered on new commits in master
+
+include:
+  - 'ci/gitlab-ci-templates.yml'
+  - 'ci/gitlab-ci-master-deploy-test.yml'
+  - 'ci/gitlab-ci-merge-request.yml'

@@ -1,0 +1,225 @@
+# This is the main pipeline. It must be triggered on each commit to master.
+
+.default_rules: &default_rules
+  - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    changes:
+      - .gitlab-ci.yml
+      - ci/**/*
+    when: manual
+  - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    changes:
+      - '**/*[!.md]'
+    when: on_success
+  - when: never
+
+
+last-commit:
+  stage: Build And Test
+  extends: .create-badge-template
+  variables:
+    BADGE_NAME: "Last Commit"
+    BADGE_FILE: "last-commit.svg"
+    BADGE_COLOR: "green"
+  script:
+    - set -ex
+    - anybadge -l "$BADGE_NAME" -v "$(date '+%d.%m.%Y %H:%M')" -f "$BADGE_FILE" -c "$BADGE_COLOR"
+  rules:
+    *default_rules
+
+
+python-info:
+  stage: Build And Test
+  extends: .create-badge-template
+  variables:
+    BADGE_NAME: "Python Version"
+    BADGE_FILE: "py-version.svg"
+    BADGE_COLOR: "green"
+  script:
+    - set -ex
+    - anybadge -l "$BADGE_NAME" -v "$(python3 --version | cut -d ' ' -f2)" -f "$BADGE_FILE" -c "$BADGE_COLOR"
+  rules:
+    *default_rules
+
+
+build-and-test-stage:
+  extends: .login-logout-registry-template
+  image: $BUILD_AND_TEST_IMAGE
+  stage: Build And Test
+  tags:
+    - shell
+    - stage
+  rules:
+    *default_rules
+  variables:
+    GIT_FETCH_EXTRA_FLAGS: --tags
+  script:
+    - set -e
+    - IMAGE_TAG="v$(< .version)"
+    - docker build --tag ${IMAGE_NAME}:${IMAGE_TAG} .
+    - mkdir -p reports
+    - docker run --rm -v $(pwd)/reports:/reports ${IMAGE_NAME}:${IMAGE_TAG} bash -c "
+      set -e;
+      pytest -vvv --junitxml=.junit.xml --cov=. --cov-report=term-missing --no-cov-on-fail tests;
+      coverage html;
+      coverage xml -i;
+      ls -la;
+      ls -la /reports;
+      mv htmlcov /reports/htmlcov;
+      mv .junit.xml /reports/.junit.xml;
+      mv coverage.xml /reports/coverage.xml;
+      chmod 777 -R /reports;"
+    - docker push ${IMAGE_NAME}:${IMAGE_TAG}
+  artifacts:
+    paths:
+      - .version
+      - reports/htmlcov
+      - reports/.junit.xml
+      - reports/coverage.xml
+    reports:
+      cobertura: reports/coverage.xml
+
+
+calc-version:
+  image: $CALC_VERSION_IMAGE
+  stage: Calc Version
+  rules:
+    *default_rules
+  tags:
+    - docker
+    - stage
+  variables:
+    GSG_INITIAL_DEVELOPMENT: "false"
+  script:
+    - |-
+      go-semrel-gitlab-release next-version > .version && go-semrel-gitlab-release tag \
+      || go-semrel-gitlab-release next-version --allow-current > .version;
+  artifacts:
+    paths:
+      - .version
+
+
+deploy-stage:
+  extends: .base-deploy-template
+  stage: Deploy Stage
+  rules:
+    *default_rules
+  variables:
+    KUBE_TOKEN: ${KUBECTL_STAGE}
+    LAYER: stage
+    HELM_VALUES: deploy/stage.yml
+  tags:
+    - stage
+    - docker
+  allow_failure: false
+
+
+deploy-pre:
+  extends: .base-deploy-template
+  stage: Deploy Pre
+  rules:
+    *default_rules
+  variables:
+    KUBE_TOKEN: ${KUBECTL_PRE}
+    LAYER: pre
+    HELM_VALUES: deploy/pre.yml
+  tags:
+    - pre
+    - docker
+  allow_failure: false
+
+
+notify-stage:
+  extends: .base-notify-template
+  stage: Notify Stage
+  rules:
+    *default_rules
+  variables:
+    SLACK_TOKEN: ${SLACK_TOKEN}
+    GITLAB_TOKEN: ${GL_TOKEN}
+    PROJECT_ID: ${CI_PROJECT_ID}
+    CHANNEL_ID: ${SLACK_CHANNEL_STAGE_ID}
+    LAYER: stage
+    GLOBAL_NOTIFY: ''
+    SERVICE_NAME: ${PROJECT_NAME}
+  allow_failure: true
+
+
+notify-pre:
+  extends: .base-notify-template
+  stage: Notify Pre
+  rules:
+    *default_rules
+  variables:
+    SLACK_TOKEN: ${SLACK_TOKEN}
+    GITLAB_TOKEN: ${GL_TOKEN}
+    PROJECT_ID: ${CI_PROJECT_ID}
+    CHANNEL_ID: ${SLACK_CHANNEL_PRE_ID}
+    LAYER: pre
+    GLOBAL_NOTIFY: ''
+    SERVICE_NAME: ${PROJECT_NAME}
+  allow_failure: true
+
+
+version:
+  image: $CALC_VERSION_IMAGE
+  stage: Get Version
+  tags:
+    - docker
+    - prod
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      changes:
+        - '**/*[!.md]'
+      when: manual
+    - when: never
+  variables:
+    GSG_INITIAL_DEVELOPMENT: "false"
+  script:
+    - go-semrel-gitlab-release next-version --allow-current > .version
+  artifacts:
+    paths:
+      - .version
+# Does not pull dependencies from the last steps to have possibility to write to the .version file.
+# Dependencies is pulled with 0644 permissions and gitlab-runner gitlab-runner owner
+# but a container is run under user kube so it's impossible to change artifacts.
+  dependencies: []
+
+
+deploy-prod:
+  extends: .base-deploy-template
+  stage: Deploy Prod
+  variables:
+    KUBE_TOKEN: ${KUBECTL_PROD}
+    LAYER: prod
+    HELM_VALUES: deploy/prod.yml
+  tags:
+    - prod
+    - docker
+  rules:
+    *default_rules
+  needs:
+    - version
+  dependencies:
+    - version
+  allow_failure: false
+
+
+notify-prod:
+  extends: .base-notify-template
+  stage: Notify Prod
+  variables:
+    SLACK_TOKEN: ${SLACK_TOKEN}
+    GITLAB_TOKEN: ${GL_TOKEN}
+    PROJECT_ID: ${CI_PROJECT_ID}
+    CHANNEL_ID: ${SLACK_CHANNEL_PROD_ID}
+    LAYER: prod
+    GLOBAL_NOTIFY: ''
+    SERVICE_NAME: ${PROJECT_NAME}
+  rules:
+    *default_rules
+  needs:
+    - deploy-prod
+    - version
+  dependencies:
+    - version
+  allow_failure: true
